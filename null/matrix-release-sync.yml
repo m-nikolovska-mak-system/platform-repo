@@ -1,0 +1,298 @@
+# ========================================
+# Matrix-Based File Sync Workflow
+# ========================================
+# 
+# This workflow reads a matrix configuration file and
+# syncs files according to source → destination mappings.
+# 
+# Benefits:
+# - Map different sources to different destinations
+# - Run multiple sync operations in parallel
+# - Override settings per mapping
+# - Easy to add new mappings
+# ========================================
+
+name: Sync to Platform Repo (Matrix)
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  # ─────────────────────────────────────
+  # JOB 1: Load Matrix Configuration
+  # ─────────────────────────────────────
+  load-matrix:
+    name: Load Sync Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      destination_repo: ${{ steps.global.outputs.destination_repo }}
+      create_tag: ${{ steps.global.outputs.create_tag }}
+      tag_prefix: ${{ steps.global.outputs.tag_prefix }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+      
+      - name: Load global settings
+        id: global
+        run: |
+          CONFIG_FILE=".github/sync-config.yml"
+          
+          echo "destination_repo=$(yq eval '.global.destination_repo' $CONFIG_FILE)" >> $GITHUB_OUTPUT
+          echo "create_tag=$(yq eval '.global.create_tag' $CONFIG_FILE)" >> $GITHUB_OUTPUT
+          echo "tag_prefix=$(yq eval '.global.tag_prefix' $CONFIG_FILE)" >> $GITHUB_OUTPUT
+      
+      - name: Build matrix from config
+        id: set-matrix
+        run: |
+          CONFIG_FILE=".github/sync-config.yml"
+          
+          # Convert YAML mappings to JSON matrix
+          # This creates an array of mapping objects
+          MATRIX=$(yq eval -o=json '.mappings' $CONFIG_FILE)
+          
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+          
+          # Show what we loaded (for debugging)
+          echo "📋 Loaded mappings:"
+          echo "$MATRIX" | jq -r '.[] | "  - \(.name): \(.source | join(", ")) → \(.destination)"'
+
+  # ─────────────────────────────────────
+  # JOB 2: Sync Files (Matrix Strategy)
+  # ─────────────────────────────────────
+  sync-files:
+    name: Sync ${{ matrix.mapping.name }}
+    needs: load-matrix
+    runs-on: ubuntu-latest
+    
+    # Run once for each mapping in the matrix
+    strategy:
+      matrix:
+        mapping: ${{ fromJson(needs.load-matrix.outputs.matrix) }}
+      fail-fast: false  # Continue other mappings if one fails
+      max-parallel: 5   # Run up to 5 mappings in parallel
+    
+    steps:
+      - name: Checkout source repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          path: source
+      
+      - name: Checkout destination repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.mapping.destination_repo || needs.load-matrix.outputs.destination_repo }}
+          token: ${{ secrets.PLATFORM_PAT }}
+          fetch-depth: 0
+          path: destination
+      
+      - name: Detect files to sync
+        id: detect
+        working-directory: source
+        run: |
+          echo "🔍 Detecting files for mapping: ${{ matrix.mapping.name }}"
+          
+          SYNC_MODE="${{ matrix.mapping.sync_mode || 'changed' }}"
+          
+          # ────────────────────────────────────
+          # Detect changed files (if mode = changed)
+          # ────────────────────────────────────
+          if [ "$SYNC_MODE" == "changed" ]; then
+            git fetch --tags
+            LATEST="${{ github.event.release.tag_name }}"
+            PREVIOUS=$(git describe --tags --abbrev=0 ${LATEST}^ 2>/dev/null || echo "")
+            
+            if [ -z "$PREVIOUS" ]; then
+              echo "ℹ️  First release - syncing all files"
+              git ls-files > all_files.txt
+            else
+              echo "📊 Previous: $PREVIOUS, Latest: $LATEST"
+              git diff --name-only $PREVIOUS $LATEST > all_files.txt
+            fi
+          else
+            echo "📊 Sync mode: all files"
+            git ls-files > all_files.txt
+          fi
+          
+          # ────────────────────────────────────
+          # Filter files by source patterns
+          # ────────────────────────────────────
+          > files_to_sync.txt
+          
+          # Read source patterns from matrix
+          echo '${{ toJson(matrix.mapping.source) }}' | jq -r '.[]' | while IFS= read -r pattern; do
+            if [ -n "$pattern" ]; then
+              echo "  Checking pattern: $pattern"
+              grep -E "^${pattern//\*/.*}$" all_files.txt >> files_to_sync.txt 2>/dev/null || true
+            fi
+          done
+          
+          # Remove duplicates
+          sort -u files_to_sync.txt > files_to_sync_clean.txt
+          mv files_to_sync_clean.txt files_to_sync.txt
+          
+          FILE_COUNT=$(wc -l < files_to_sync.txt)
+          echo "✅ Found $FILE_COUNT files to sync for mapping: ${{ matrix.mapping.name }}"
+          
+          if [ $FILE_COUNT -eq 0 ]; then
+            echo "has_files=false" >> $GITHUB_OUTPUT
+          else
+            echo "has_files=true" >> $GITHUB_OUTPUT
+            echo "file_count=$FILE_COUNT" >> $GITHUB_OUTPUT
+            
+            # Store file list
+            echo "FILES_TO_SYNC<<EOF" >> $GITHUB_ENV
+            cat files_to_sync.txt >> $GITHUB_ENV
+            echo "EOF" >> $GITHUB_ENV
+            
+            echo ""
+            echo "Files to sync:"
+            cat files_to_sync.txt
+          fi
+      
+      - name: Copy files to destination
+        if: steps.detect.outputs.has_files == 'true'
+        run: |
+          echo "📦 Copying files for mapping: ${{ matrix.mapping.name }}"
+          
+          cd source
+          
+          DEST_BASE="../destination/${{ matrix.mapping.destination }}"
+          mkdir -p "$DEST_BASE"
+          
+          PRESERVE_STRUCTURE="${{ matrix.mapping.preserve_structure }}"
+          
+          COPIED=0
+          FAILED=0
+          
+          while IFS= read -r file; do
+            if [ -z "$file" ] || [ ! -f "$file" ]; then
+              continue
+            fi
+            
+            # Determine destination path
+            if [ "$PRESERVE_STRUCTURE" == "true" ]; then
+              DEST_FILE="$DEST_BASE/$file"
+              DEST_DIR=$(dirname "$DEST_FILE")
+            else
+              FILE_NAME=$(basename "$file")
+              DEST_FILE="$DEST_BASE/$FILE_NAME"
+              DEST_DIR="$DEST_BASE"
+            fi
+            
+            mkdir -p "$DEST_DIR"
+            cp "$file" "$DEST_FILE"
+            echo "✓ Copied: $file → $DEST_FILE"
+            COPIED=$((COPIED + 1))
+            
+          done <<< "$FILES_TO_SYNC"
+          
+          echo ""
+          echo "📊 Mapping '${{ matrix.mapping.name }}' Summary:"
+          echo "  ✅ Copied: $COPIED files"
+          echo "  ❌ Failed: $FAILED files"
+          
+          if [ $COPIED -eq 0 ]; then
+            echo "::error::No files copied for mapping: ${{ matrix.mapping.name }}"
+            exit 1
+          fi
+      
+      - name: Commit changes
+        if: steps.detect.outputs.has_files == 'true'
+        working-directory: destination
+        run: |
+          echo "💾 Committing changes for mapping: ${{ matrix.mapping.name }}"
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git add .
+          
+          if git diff --staged --quiet; then
+            echo "ℹ️  No changes to commit for mapping: ${{ matrix.mapping.name }}"
+            exit 0
+          fi
+          
+          COMMIT_MSG="🔄 Sync ${{ matrix.mapping.name }} from ${{ github.repository }} (${{ github.event.release.tag_name }})"
+          git commit -m "$COMMIT_MSG"
+          git push
+          
+          echo "✅ Changes committed for mapping: ${{ matrix.mapping.name }}"
+      
+      - name: Summary
+        if: always()
+        run: |
+          echo "## 🗺️ Mapping: ${{ matrix.mapping.name }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Source:** ${{ toJson(matrix.mapping.source) }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Destination:** \`${{ matrix.mapping.destination }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Preserve Structure:** ${{ matrix.mapping.preserve_structure }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Sync Mode:** ${{ matrix.mapping.sync_mode || 'changed' }}" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ steps.detect.outputs.has_files }}" == "true" ]; then
+            echo "**Files Synced:** ${{ steps.detect.outputs.file_count }}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Files Synced:** 0 (no matching files)" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # ─────────────────────────────────────
+  # JOB 3: Create Release Tag (Once)
+  # ─────────────────────────────────────
+  create-tag:
+    name: Create Release Tag
+    needs: [load-matrix, sync-files]
+    if: needs.load-matrix.outputs.create_tag == 'true'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout destination repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.load-matrix.outputs.destination_repo }}
+          token: ${{ secrets.PLATFORM_PAT }}
+          fetch-depth: 0
+      
+      - name: Create and push tag
+        run: |
+          TAG_NAME="${{ needs.load-matrix.outputs.tag_prefix }}${{ github.event.release.tag_name }}"
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
+            echo "⚠️  Tag '$TAG_NAME' already exists"
+            exit 0
+          fi
+          
+          git tag "$TAG_NAME"
+          git push origin "$TAG_NAME"
+          
+          echo "✅ Tag '$TAG_NAME' created and pushed"
+
+  # ─────────────────────────────────────
+  # JOB 4: Final Summary
+  # ─────────────────────────────────────
+  summary:
+    name: Sync Summary
+    needs: [load-matrix, sync-files]
+    if: always()
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Generate summary
+        run: |
+          echo "## 🎉 File Sync Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Release:** ${{ github.event.release.tag_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Repository:** ${{ github.repository }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Destination:** ${{ needs.load-matrix.outputs.destination_repo }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Check individual mapping results above ☝️" >> $GITHUB_STEP_SUMMARY
