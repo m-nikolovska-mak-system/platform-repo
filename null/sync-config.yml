@@ -10,7 +10,7 @@
 # Global Settings (apply to all mappings)
 # ────────────────────────────────────
 destination_repo: m-nikolovska-mak-system/deployment-reference
-sync_mode: changed
+sync_mode: all
 create_tag: false
 tag_prefix: platform-
 

@@ -1,0 +1,120 @@
+name: Branch Name Check
+
+on: 
+#  pull_request:
+#  push:  
+  workflow_dispatch: 
+
+jobs:
+  check-branch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Get branch name
+        id: branch
+        run: |
+          # Try multiple methods to get branch name
+          if [ -n "$GITHUB_HEAD_REF" ]; then
+            # PR event
+            branch="$GITHUB_HEAD_REF"
+            echo "📍 Branch from PR: $branch"
+          elif [ -n "$GITHUB_REF_NAME" ]; then
+            # Push event
+            branch="$GITHUB_REF_NAME"
+            echo "📍 Branch from push: $branch"
+          else
+            # Fallback to git
+            branch=$(git rev-parse --abbrev-ref HEAD)
+            echo "📍 Branch from git: $branch"
+          fi
+          
+          echo "branch=$branch" >> $GITHUB_OUTPUT
+          echo "Current branch: $branch"
+      
+      - name: Check branch naming convention
+        run: |
+          branch="${{ steps.branch.outputs.branch }}"
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "🔍 Branch Name Validation"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+          echo "Branch: $branch"
+          echo ""
+          
+          # Skip check for main/master
+          if [[ "$branch" == "main" || "$branch" == "master" ]]; then
+            echo "✅ Main branch - skipping validation"
+            exit 0
+          fi
+          
+          # Allowed patterns
+          echo "📋 Allowed patterns:"
+          echo "  • feature/description"
+          echo "  • bugfix/description"
+          echo "  • hotfix/description"
+          echo "  • release/version"
+          echo ""
+          
+          # Check pattern
+          if [[ "$branch" =~ ^(feature|bugfix|hotfix|release)/.+ ]]; then
+            prefix=$(echo "$branch" | cut -d'/' -f1)
+            description=$(echo "$branch" | cut -d'/' -f2-)
+            
+            echo "✅ VALID BRANCH NAME"
+            echo ""
+            echo "  Type: $prefix"
+            echo "  Description: $description"
+            echo ""
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          else
+            echo "❌ INVALID BRANCH NAME"
+            echo ""
+            echo "Your branch: $branch"
+            echo ""
+            echo "❌ Does not match required pattern"
+            echo ""
+            echo "Examples of valid names:"
+            echo "  ✅ feature/add-login-page"
+            echo "  ✅ bugfix/fix-memory-leak"
+            echo "  ✅ hotfix/security-patch"
+            echo "  ✅ release/v1.2.0"
+            echo ""
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            exit 1
+          fi
+      
+      - name: Additional branch checks
+        if: always()
+        run: |
+          branch="${{ steps.branch.outputs.branch }}"
+          
+          echo ""
+          echo "🔍 Additional Checks:"
+          echo ""
+          
+          # Check for spaces
+          if [[ "$branch" =~ \  ]]; then
+            echo "⚠️  Branch contains spaces - use hyphens instead"
+          else
+            echo "✅ No spaces in branch name"
+          fi
+          
+          # Check for uppercase
+          if [[ "$branch" =~ [A-Z] ]]; then
+            echo "⚠️  Branch contains uppercase - use lowercase"
+          else
+            echo "✅ All lowercase"
+          fi
+          
+          # Check length
+          length=${#branch}
+          if [ $length -lt 10 ]; then
+            echo "⚠️  Branch name is short ($length chars) - be more descriptive"
+          elif [ $length -gt 50 ]; then
+            echo "⚠️  Branch name is long ($length chars) - consider shortening"
+          else
+            echo "✅ Good length ($length chars)"
+          fi
+        continue-on-error: true

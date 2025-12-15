@@ -45,9 +45,19 @@ jobs:
         run: |
           CONFIG_FILE=".github/sync-config.yml"
           
-          echo "destination_repo=$(yq eval '.global.destination_repo' $CONFIG_FILE)" >> $GITHUB_OUTPUT
-          echo "create_tag=$(yq eval '.global.create_tag' $CONFIG_FILE)" >> $GITHUB_OUTPUT
-          echo "tag_prefix=$(yq eval '.global.tag_prefix' $CONFIG_FILE)" >> $GITHUB_OUTPUT
+          # Read top-level keys (NOT nested under 'global')
+          DEST_REPO=$(yq eval '.destination_repo' $CONFIG_FILE)
+          CREATE_TAG=$(yq eval '.create_tag' $CONFIG_FILE)
+          TAG_PREFIX=$(yq eval '.tag_prefix' $CONFIG_FILE)
+          
+          echo "destination_repo=$DEST_REPO" >> $GITHUB_OUTPUT
+          echo "create_tag=$CREATE_TAG" >> $GITHUB_OUTPUT
+          echo "tag_prefix=$TAG_PREFIX" >> $GITHUB_OUTPUT
+          
+          echo "📋 Global settings loaded:"
+          echo "  Destination repo: $DEST_REPO"
+          echo "  Create tag: $CREATE_TAG"
+          echo "  Tag prefix: $TAG_PREFIX"
       
       - name: Build matrix from config
         id: set-matrix
@@ -63,7 +73,7 @@ jobs:
           # Show what we loaded (for debugging)
           echo "📋 Loaded mappings:"
           echo "$MATRIX" | jq -r '.[] | "  - \(.name): \(.source | join(", ")) → \(.destination)"'
-
+ 
   # ─────────────────────────────────────
   # JOB 2: Sync Files (Matrix Strategy)
   # ─────────────────────────────────────
@@ -102,9 +112,7 @@ jobs:
           
           SYNC_MODE="${{ matrix.mapping.sync_mode || 'changed' }}"
           
-          # ────────────────────────────────────
-          # Detect changed files (if mode = changed)
-          # ────────────────────────────────────
+          # Detect changed files or all files
           if [ "$SYNC_MODE" == "changed" ]; then
             git fetch --tags
             LATEST="${{ github.event.release.tag_name }}"
@@ -122,24 +130,30 @@ jobs:
             git ls-files > all_files.txt
           fi
           
-          # ────────────────────────────────────
           # Filter files by source patterns
-          # ────────────────────────────────────
           > files_to_sync.txt
           
-          # Read source patterns from matrix
+          # Process each source pattern
           echo '${{ toJson(matrix.mapping.source) }}' | jq -r '.[]' | while IFS= read -r pattern; do
             if [ -n "$pattern" ]; then
               echo "  Checking pattern: $pattern"
-              grep -E "^${pattern//\*/.*}$" all_files.txt >> files_to_sync.txt 2>/dev/null || true
+              
+              # Convert glob pattern to regex for grep
+              # ** becomes .*
+              # * becomes [^/]*
+              REGEX_PATTERN="${pattern//\*\*/DOUBLESTAR}"
+              REGEX_PATTERN="${REGEX_PATTERN//\*/[^/]*}"
+              REGEX_PATTERN="${REGEX_PATTERN//DOUBLESTAR/.*}"
+              
+              grep -E "^${REGEX_PATTERN}$" all_files.txt >> files_to_sync.txt 2>/dev/null || true
             fi
           done
           
           # Remove duplicates
-          sort -u files_to_sync.txt > files_to_sync_clean.txt
+          sort -u files_to_sync.txt > files_to_sync_clean.txt || true
           mv files_to_sync_clean.txt files_to_sync.txt
           
-          FILE_COUNT=$(wc -l < files_to_sync.txt)
+          FILE_COUNT=$(wc -l < files_to_sync.txt 2>/dev/null || echo "0")
           echo "✅ Found $FILE_COUNT files to sync for mapping: ${{ matrix.mapping.name }}"
           
           if [ $FILE_COUNT -eq 0 ]; then
@@ -171,7 +185,6 @@ jobs:
           PRESERVE_STRUCTURE="${{ matrix.mapping.preserve_structure }}"
           
           COPIED=0
-          FAILED=0
           
           while IFS= read -r file; do
             if [ -z "$file" ] || [ ! -f "$file" ]; then
@@ -198,11 +211,9 @@ jobs:
           echo ""
           echo "📊 Mapping '${{ matrix.mapping.name }}' Summary:"
           echo "  ✅ Copied: $COPIED files"
-          echo "  ❌ Failed: $FAILED files"
           
           if [ $COPIED -eq 0 ]; then
-            echo "::error::No files copied for mapping: ${{ matrix.mapping.name }}"
-            exit 1
+            echo "::warning::No files were copied for mapping: ${{ matrix.mapping.name }}"
           fi
       
       - name: Commit changes

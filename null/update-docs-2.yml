@@ -1,0 +1,23 @@
+name: Update Docs for Workflows
+on:
+#  push:
+#    branches: [main]
+  workflow_dispatch: 
+
+jobs:
+  update-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate docs for main action
+        uses: tj-actions/auto-doc@v3
+        with:
+          filename: action.yml
+          output: README.md
+
+      - name: Generate docs for reusable workflow
+        uses: tj-actions/auto-doc@v3
+        with:
+          filename: .github/workflows/notify-app-changes-v3.yml
+          output: docs/reusable.md

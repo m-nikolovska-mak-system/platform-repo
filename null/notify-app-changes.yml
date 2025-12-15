@@ -1,0 +1,22 @@
+name: Notify on App.java Changes
+
+on:
+ # release:
+  #  types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-and-notify:
+    uses: m-nikolovska-mak-system/reusable-actions-library/.github/workflows/release-file-watcher.yml@main
+    with:
+      watched_files: 'oneProjectWed/src/java/com/miha/app/App.java'
+      notification_title: '🚀 App.java Changed in Release'
+      notification_message: '⚠️ **Action Required:** Prepare new installer for Template Designer'
+      card_color: 'Warning'
+      link_url: ${{ github.event.release.html_url }}
+      link_text: 'View Release'
+    secrets:
+      teams_webhook_url: ${{ secrets.TEAMS_WEBHOOK_INSTALLER_URL }}

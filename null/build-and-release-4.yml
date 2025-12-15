@@ -1,0 +1,123 @@
+name: Build & Release Java App
+
+# Trigger configuration
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Perform a dry run without publishing'
+        required: false
+        default: 'false'
+ # release:
+  #  types: [created]
+
+# Environment variables for consistency
+env:
+  JAVA_VERSION: '17'
+  JAVA_DISTRIBUTION: 'temurin'
+  GRADLE_TASK: 'jar'
+
+# Concurrency settings to prevent overlapping runs
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.release.tag_name || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  # Phase 1: Build
+  build_jar:
+    name: Build JAR
+    uses: m-nikolovska-mak-system/reusable-actions-library/.github/workflows/build-jar.yml@main
+    with:
+      release_tag: ${{ github.event.release.tag_name || 'dev' }}
+      gradle_task: ${{ env.GRADLE_TASK }}
+      java_version: ${{ env.JAVA_VERSION }}
+      java_distribution: ${{ env.JAVA_DISTRIBUTION }}
+
+
+  # Phase 1: Validation
+  detect_iss:
+    name: Detect Setup Script
+    uses: m-nikolovska-mak-system/reusable-actions-library/.github/workflows/detect-setup-script.yml@main
+    with:
+      pattern: "**/*.iss"
+      fail_if_missing: true
+
+
+
+  validate_inputs:
+      name: Validate Build Outputs
+      needs: build_jar
+      runs-on: ubuntu-latest
+      steps:
+        - name: Validate JAR cache key
+          run: |
+            if [ -z "${{ needs.build_jar.outputs.jar_cache_key }}" ]; then
+              echo "::error::JAR cache key is empty - build may have failed"
+              exit 1
+            fi
+            echo "✓ JAR cache key validated: ${{ needs.build_jar.outputs.jar_cache_key }}"
+  
+        - name: Validate JAR path
+          run: |
+            if [ -z "${{ needs.build_jar.outputs.jar_path }}" ]; then
+              echo "::error::JAR path is empty - artifact may not have been created"
+              exit 1
+            fi
+            echo "✓ JAR path validated: ${{ needs.build_jar.outputs.jar_path }}"
+
+
+
+  # Phase 2: Build installer
+  build_installer:
+    name: Build Windows Installer
+    needs: [build_jar, detect_iss, validate_inputs]
+    uses: m-nikolovska-mak-system/reusable-actions-library/.github/workflows/build-installer.yml@main
+    with:
+      setup_script: ${{ needs.detect_iss.outputs.setup_script }}
+      jar_path: ${{ needs.build_jar.outputs.jar_path }}
+      jar_cache_key: ${{ needs.build_jar.outputs.jar_cache_key }}
+      app_name: ${{ github.event.repository.name }}
+      app_version: ${{ github.event.release.tag_name || 'dev' }}
+      output_name: "Setup-${{ github.event.release.tag_name || 'dev' }}"
+
+
+
+  # Phase 3: Upload (conditional on not dry-run)
+  upload_release:
+    name: Upload Release Asset
+    needs: build_installer
+    if: |
+      github.event_name == 'release' &&
+      github.event.action == 'created' &&
+      inputs.dry_run != 'true'
+    uses: m-nikolovska-mak-system/reusable-actions-library/.github/workflows/upload-release.yml@main
+    with:
+      tag_name: ${{ github.event.release.tag_name }}
+      artifact_name: ${{ needs.build_installer.outputs.installer_artifact_name }}
+
+  # Phase 4: Notifications
+  notify_success:
+    name: Notify Success
+    needs: [build_jar, detect_iss, validate_inputs, build_installer, upload_release]
+    if: success() && github.event_name == 'release'
+    uses: m-nikolovska-mak-system/reusable-actions-library/.github/workflows/teams-notifier.yml@main
+    with:
+      notification_title: "✅ Build & Release Succeeded!"
+      action_required_message: "Release ${{ github.event.release.tag_name }} is ready. View: ${{ github.event.release.html_url }}"
+    secrets:
+      teams_webhook_url: ${{ secrets.TEAMS_WEBHOOK_URL }}
+  
+  notify_failure:
+    name: Notify Failure
+    needs: [build_jar, detect_iss, validate_inputs, build_installer, upload_release]
+    if: failure()
+    uses: m-nikolovska-mak-system/reusable-actions-library/.github/workflows/teams-notifier.yml@main
+    with:
+      notification_title: "🚨 Build & Release Failed!"
+      action_required_message: |
+        Check logs: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        Release: ${{ github.event.release.tag_name || 'N/A' }}
+    secrets:
+      teams_webhook_url: ${{ secrets.TEAMS_WEBHOOK_URL }}
+
+

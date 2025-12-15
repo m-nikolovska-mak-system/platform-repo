@@ -1,0 +1,25 @@
+name: Test Jira Assignment
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue_key:
+        description: "Jira Issue (e.g. ABC-123)"
+        required: true
+        type: string
+      assignee_email:
+        description: "Email of assignee"
+        required: true
+        type: string
+
+jobs:
+  assign:
+    name: Assign Jira Ticket
+    uses: m-nikolovska-mak-system/reusable-actions-library/.github/workflows/assign-jira-ticket.yml@main
+    with:
+      issue_key: ${{ inputs.issue_key }}
+      assignee_email: ${{ inputs.assignee_email }}
+    secrets:
+      JIRA_EMAIL: ${{ secrets.JIRA_USER }}
+      JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+      JIRA_URL: ${{ secrets.JIRA_BASE_URL }}

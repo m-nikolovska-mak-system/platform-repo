@@ -1,0 +1,52 @@
+name: Teams Notification Template
+
+on:
+  workflow_call:
+    inputs:
+      notification_title:
+        description: 'Title of the notification card'
+        required: true
+        type: string
+      action_required_message:
+        description: 'Message to display in the attention container'
+        required: false
+        type: string
+        default: '⚠️ **Reminder:** Changes detected that may require action'
+      card_color:
+        description: 'Color accent for the card title (Accent, Good, Warning, Attention)'
+        required: false
+        type: string
+        default: 'Accent'
+      show_files:
+        description: 'Whether to show changed files in the notification'
+        required: false
+        type: boolean
+        default: true
+      watched_path:
+        description: 'Optional file or directory path to monitor (only trigger notification if this path changes)'
+        required: false
+        type: string
+        default: ''
+    secrets:
+      teams_webhook_url:
+        description: 'Microsoft Teams webhook URL'
+        required: true
+
+jobs:
+  detect:
+    uses: ./.github/workflows/detect-file-change.yml
+    with:
+      watched_path: ${{ inputs.watched_path }}
+
+  notify:
+    needs: detect
+    if: needs.detect.outputs.found == 'true'
+    uses: ./.github/workflows/send-teams-notif.yml
+    with:
+      notification_title: ${{ inputs.notification_title }}
+      action_required_message: ${{ inputs.action_required_message }}
+      card_color: ${{ inputs.card_color }}
+      show_files: ${{ inputs.show_files }}
+      files: ${{ needs.detect.outputs.files }}
+    secrets:
+      teams_webhook_url: ${{ secrets.teams_webhook_url }}

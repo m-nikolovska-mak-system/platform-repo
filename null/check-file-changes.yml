@@ -1,0 +1,94 @@
+name: Check File Changes
+
+on:
+  workflow_call:
+    inputs:
+      file_pattern:
+        description: 'Regex pattern for files to check'
+        required: true
+        type: string
+      current_ref:
+        description: 'Current ref (tag/branch)'
+        required: false
+        type: string
+        default: ''
+      previous_ref:
+        description: 'Previous ref (auto-detected if empty)'
+        required: false
+        type: string
+        default: ''
+    outputs:
+      changed:
+        description: 'Whether files changed'
+        value: ${{ jobs.check.outputs.changed }}
+      files:
+        description: 'List of changed files'
+        value: ${{ jobs.check.outputs.files }}
+      current_ref:
+        description: 'Current ref used'
+        value: ${{ jobs.check.outputs.current_ref }}
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.detect.outputs.changed }}
+      files: ${{ steps.detect.outputs.files }}
+      current_ref: ${{ steps.refs.outputs.current }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve refs
+        id: refs
+        run: |
+          current="${{ inputs.current_ref }}"
+          previous="${{ inputs.previous_ref }}"
+          
+          # Auto-detect current ref
+          if [ -z "$current" ]; then
+            if [ -n "${{ github.event.release.tag_name }}" ]; then
+              current="${{ github.event.release.tag_name }}"
+            else
+              current="${{ github.ref_name }}"
+            fi
+          fi
+          
+          # Auto-detect previous ref
+          if [ -z "$previous" ]; then
+            previous=$(git tag --sort=-creatordate | grep -v "^${current}$" | head -n1)
+            previous="${previous:-HEAD~1}"
+          fi
+          
+          echo "current=$current" >> $GITHUB_OUTPUT
+          echo "previous=$previous" >> $GITHUB_OUTPUT
+          echo "📊 Comparing: $previous → $current"
+
+      - name: Detect changes
+        id: detect
+        run: |
+          pattern="${{ inputs.file_pattern }}"
+          prev="${{ steps.refs.outputs.previous }}"
+          curr="${{ steps.refs.outputs.current }}"
+          
+          echo "🔍 Searching for pattern: $pattern"
+          
+          changed_files=$(git diff --name-only "$prev" "$curr" | grep -E "$pattern" || true)
+          
+          if [ -n "$changed_files" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "files<<EOF" >> $GITHUB_OUTPUT
+            echo "$changed_files" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            echo "✅ Files changed:"
+            echo "$changed_files"
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "files=" >> $GITHUB_OUTPUT
+            echo "ℹ️ No matching files changed"
+          fi

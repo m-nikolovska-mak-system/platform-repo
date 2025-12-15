@@ -1,0 +1,144 @@
+name: Build and Release
+# Main workflow that orchestrates JAR build, installer creation, and release upload
+
+on:
+  # release:
+    # types: [published]
+
+  
+  # For testing
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag to build (leave empty for current branch)'
+        required: false
+        type: string
+      test_mode:
+        description: 'Test mode (skip release upload)'
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  # Step 1: Build the JAR file
+  build-jar:
+    name: Build JAR with Gradle
+    uses: m-nikolovska-mak-system/reusable-actions-library/.github/workflows/build-jar.yml@main
+    with:
+      java_version: '17'
+      gradle_task: 'jar'
+      release_tag: ${{ github.event.inputs.release_tag || github.event.release.tag_name || 'main' }}
+
+  # Step 2: Detect Inno Setup script
+  detect-setup-script:
+    name: Detect Inno Setup Script
+    runs-on: ubuntu-latest
+    outputs:
+      setup_script: ${{ steps.detect.outputs.script }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.release_tag || github.event.release.tag_name || 'main' }}
+      
+      - name: Find .iss script
+        id: detect
+        run: |
+          echo "🔍 Looking for Inno Setup script..."
+          
+          # Look for .iss files in root and common directories
+          script=$(find . -maxdepth 2 -name "*.iss" -type f | head -n 1)
+          
+          if [ -z "$script" ]; then
+            echo "❌ ERROR: No .iss setup script found!"
+            echo ""
+            echo "Searched in:"
+            echo "  - Root directory"
+            echo "  - One level deep subdirectories"
+            exit 1
+          fi
+          
+          # Remove leading ./
+          script=${script#./}
+          
+          echo "✅ Found setup script: $script"
+          echo "script=$script" >> $GITHUB_OUTPUT
+
+  # Step 3: Build Windows installer
+  build-installer:
+    name: Build Windows Installer
+    needs: [build-jar, detect-setup-script]
+    uses:  m-nikolovska-mak-system/reusable-actions-library/.github/workflows/build-installer.yml@main
+    with:
+      jar_cache_key: ${{ needs.build-jar.outputs.jar_cache_key }}
+      release_tag: ${{ github.event.inputs.release_tag || github.event.release.tag_name || 'main' }}
+      setup_script: ${{ needs.detect-setup-script.outputs.setup_script }}
+      app_name: ${{ github.event.repository.name }}
+      app_version: ${{ github.event.release.tag_name || github.event.inputs.release_tag || '0.0.0-dev' }}
+      output_name: 'Setup-${{ github.event.repository.name }}-${{ github.event.release.tag_name || github.event.inputs.release_tag }}'
+
+  # Step 4: Upload to GitHub Release (only on actual releases)
+  upload-to-release:
+    name: Upload Installer to Release
+    needs: build-installer
+    if: github.event_name == 'release' && !inputs.test_mode
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download installer artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build-installer.outputs.installer_artifact_name }}
+          path: ./installer
+      
+      - name: Verify installer exists
+        run: |
+          echo "📦 Downloaded artifacts:"
+          ls -lh installer/
+          echo ""
+          
+          # Check if any .exe files exist
+          if ! ls installer/*.exe 1> /dev/null 2>&1; then
+            echo "❌ ERROR: No installer .exe files found!"
+            exit 1
+          fi
+          
+          echo "✅ Installer found and ready for upload"
+      
+      - name: Upload installer to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: installer/*.exe
+          tag_name: ${{ github.event.release.tag_name }}
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Success notification
+        run: |
+          echo "✅ Installer successfully uploaded to release ${{ github.event.release.tag_name }}"
+
+
+  # Summary job for workflow_dispatch testing
+  test-summary:
+    name: Test Summary
+    needs: [build-jar, build-installer]
+    if: github.event_name == 'workflow_dispatch' && inputs.test_mode
+    runs-on: ubuntu-latest
+    steps:
+      - name: Display test results
+        run: |
+          echo "=========================================="
+          echo "🧪 TEST MODE - BUILD SUMMARY"
+          echo "=========================================="
+          echo ""
+          echo "✅ JAR Build:"
+          echo "   Filename: ${{ needs.build-jar.outputs.jar_filename }}"
+          echo "   Cache Key: ${{ needs.build-jar.outputs.jar_cache_key }}"
+          echo ""
+          echo "✅ Installer Build:"
+          echo "   Filename: ${{ needs.build-installer.outputs.installer_filename }}"
+          echo "   Artifact: ${{ needs.build-installer.outputs.installer_artifact_name }}"
+          echo ""
+          echo "ℹ️ Test mode enabled - skipped release upload"
+          echo "   To upload to release, create an actual GitHub release"
+          echo "=========================================="
