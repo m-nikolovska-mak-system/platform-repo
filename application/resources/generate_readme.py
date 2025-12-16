@@ -3,7 +3,7 @@ import yaml
 from datetime import datetime
 from pathlib import Path
 
-# ConfigurationNSS yhis is a comment hi hello hereaaaaaaaaa
+# ConfigurationNSS yhis is a comment hi hello hereaaaaaaaaaaaaaaaaaaaa
 CONFIG_PATH = "action.yml"  # or .yaml
 README_PATH = "README.md"
 
