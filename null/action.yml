@@ -1,0 +1,13 @@
+name: "My Custom Action"
+description: "Does something cool"
+inputs:
+  token:
+    description: "GitHub token"
+    required: true
+    default: ""
+outputs:
+  result:
+    description: "Result of the action"
+runs:
+  using: "node16"
+  main: "dist/index.js"

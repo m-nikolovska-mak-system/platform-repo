@@ -1,0 +1,16 @@
+on:
+  workflow_dispatch:
+    inputs:
+      NAME:
+        description: "Your name"
+        type: string
+      GREETING:
+        description: "Greeting message"
+        type: string
+
+jobs:
+  greet:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print greeting
+        run: echo "${{ github.event.inputs.GREETING }}, ${{ github.event.inputs.NAME }}!"

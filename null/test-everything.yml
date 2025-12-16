@@ -1,0 +1,49 @@
+name: Everything Workflow this is for testing like all of it hi hello testing hiii
+
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      mode:
+        type: string
+        required: false
+        default: "default"
+  workflow_call:
+    inputs:
+      caller_input:
+        type: string
+        required: false
+    secrets:
+      CALLER_SECRET:
+        required: false
+    outputs:
+      final_message:
+        description: "A message returned from the workflow"
+        value: ${{ jobs.run.outputs.message }}
+      build_artifact:
+        description: "Where an artifact ended up"
+        value: ${{ jobs.run.outputs.artifact_path }}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    outputs:
+      message: ${{ steps.create_msg.outputs.msg }}
+      artifact_path: ${{ steps.artifact.outputs.path }}
+
+    steps:
+      - name: Create message output
+        id: create_msg
+        run: |
+          echo "msg=Hello from Everything Workflow!" >> $GITHUB_OUTPUT
+
+      - name: Create fake artifact path
+        id: artifact
+        run: |
+          echo "path=/tmp/build/output.zip" >> $GITHUB_OUTPUT
+
+      - name: Indicator
+        run: echo "Running everything workflow"

@@ -1,0 +1,144 @@
+name: Update README Index in Confluence
+#not working?
+on:
+  workflow_call:
+    inputs:
+      readme_pattern:
+        description: 'Pattern to match README files'
+        required: false
+        type: string
+        default: 'docs/README-*.md'
+#  push:
+ #   branches: [main]
+  #  paths:
+   #   - 'docs/README-*.md'
+  workflow_dispatch:
+
+jobs:
+  update-confluence:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set environment and validate inputs
+        run: |
+          echo "🔹 Using pattern: ${{ inputs.readme_pattern }}"
+          if [ -z "${{ inputs.readme_pattern }}" ]; then
+            echo "⚠️ Input pattern is empty, using default: docs/README-*.md"
+          fi
+
+      - name: Scan docs folder and build HTML table
+        id: scan
+        run: |
+          echo "📂 Scanning docs folder for README files..."
+          PATTERN="${{ inputs.readme_pattern }}"
+          readmes=$(find docs -type f -name "${PATTERN##*/}" | sort)
+
+          if [ -z "$readmes" ]; then
+            echo "⚠️ No README files found matching $PATTERN. Exiting."
+            exit 0
+          fi
+
+          echo "✅ Found $(echo "$readmes" | wc -l) README files"
+
+          table="<table><tbody>"
+          table+="<tr><th>Workflow</th><th>Documentation</th><th>Last Updated</th><th>Git History</th></tr>"
+
+          while IFS= read -r file; do
+            filename=$(basename "$file")
+            workflow_name="${filename#README-}"
+            workflow_name="${workflow_name%.md}"
+
+            last_updated=$(git log -1 --format="%ai" -- "$file" | cut -d' ' -f1)
+            [ -z "$last_updated" ] && last_updated=$(date +%Y-%m-%d)
+
+            last_commit_msg=$(git log -1 --format="%s" -- "$file" | sed 's/[<>&"]//g' | cut -c1-50)
+            readme_url="https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/$file"
+            workflow_file=".github/workflows/${workflow_name}.yml"
+            workflow_url="https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/${workflow_file}"
+            history_url="https://github.com/${{ github.repository }}/commits/${{ github.ref_name }}/$file"
+
+            if [ -f "$workflow_file" ]; then
+              workflow_link="<a href=\"$workflow_url\">📋 View Workflow</a>"
+            else
+              workflow_link="<em>Workflow file not found</em>"
+            fi
+
+            table+="<tr>"
+            table+="<td><strong><code>$workflow_name</code></strong><br/>$workflow_link</td>"
+            table+="<td><a href=\"$readme_url\">📖 View README</a></td>"
+            table+="<td>$last_updated<br/><small><em>$last_commit_msg</em></small></td>"
+            table+="<td><a href=\"$history_url\">📜 History</a></td>"
+            table+="</tr>"
+          done <<< "$readmes"
+
+          table+="</tbody></table>"
+          echo "$table" > table.html
+          readme_count=$(echo "$readmes" | wc -l)
+          echo "readme_count=$readme_count" >> $GITHUB_OUTPUT
+          echo "✅ Table built and saved to table.html"
+
+      - name: Update Confluence page
+        env:
+          BASE: ${{ vars.CONFLUENCE_BASE }}
+          EMAIL: ${{ secrets.CONFLUENCE_USER }}
+          TOKEN: ${{ secrets.CONFLUENCE_API_TOKEN }}
+          PAGE_ID: ${{ secrets.CONFLUENCE_PAGE_ID }}
+        run: |
+          echo "🌐 Fetching current Confluence page version..."
+          CURRENT_VERSION=$(curl -s -u "$EMAIL:$TOKEN" \
+            "$BASE/wiki/rest/api/content/$PAGE_ID" \
+            | jq -r '.version.number // empty')
+
+          if [ -z "$CURRENT_VERSION" ]; then
+            echo "❌ Failed to fetch current page version. Check your PAGE_ID and credentials."
+            exit 1
+          fi
+
+          echo "🔢 Current version: $CURRENT_VERSION"
+          NEW_VERSION=$((CURRENT_VERSION + 1))
+          echo "⬆️ Updating to version: $NEW_VERSION"
+
+          TABLE_HTML=$(cat table.html)
+          PAGE_CONTENT="<h1>📚 Workflow Documentation Index</h1>"
+          PAGE_CONTENT+="<ac:structured-macro ac:name=\"info\"><ac:rich-text-body>"
+          PAGE_CONTENT+="<p>🤖 This page is automatically maintained by GitHub Actions</p>"
+          PAGE_CONTENT+="<p>📅 Last updated: <strong>$(TZ='Europe/Skopje' date '+%Y-%m-%d %H:%M %Z')</strong></p>"
+          PAGE_CONTENT+="<p>📊 Total workflows documented: <strong>${{ steps.scan.outputs.readme_count }}</strong></p>"
+          PAGE_CONTENT+="</ac:rich-text-body></ac:structured-macro>"
+          PAGE_CONTENT+="<h2>Workflows</h2>"
+          PAGE_CONTENT+="$TABLE_HTML"
+          PAGE_CONTENT+="<hr/>"
+          PAGE_CONTENT+="<p><small><em>READMEs auto-generated when workflow files change. "
+          PAGE_CONTENT+="See <a href=\"https://github.com/${{ github.repository }}/blob/main/.github/workflows/new-ci-readme-docs.yml\">workflow</a> for details.</em></small></p>"
+
+          echo "🚀 Sending update to Confluence..."
+          RESPONSE=$(curl -s -u "$EMAIL:$TOKEN" \
+            -X PUT "$BASE/wiki/rest/api/content/$PAGE_ID" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n \
+              --arg version "$NEW_VERSION" \
+              --arg content "$PAGE_CONTENT" \
+              '{
+                version: {number: ($version | tonumber)},
+                type: "page",
+                title: "Workflow Documentation Index",
+                body: {
+                  storage: {
+                    value: $content,
+                    representation: "storage"
+                  }
+                }
+              }')")
+
+          if echo "$RESPONSE" | jq -e '.id' > /dev/null; then
+            echo "✅ Confluence page updated successfully!"
+            echo "🔗 View at: $BASE/wiki/spaces/DS/pages/$PAGE_ID"
+          else
+            echo "❌ Failed to update Confluence page!"
+            echo "$RESPONSE" | jq .
+            exit 1
+          fi

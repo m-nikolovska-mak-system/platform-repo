@@ -1,0 +1,49 @@
+name: Notify App Changes on Release
+
+on:
+  # release:
+   # types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check_app_change:
+    runs-on: ubuntu-latest
+    outputs:
+      should_notify: ${{ steps.check.outputs.should_notify }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get current release tag
+        id: current_tag
+        run: echo "tag=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
+
+      - name: Get previous tag
+        id: previous_tag
+        run: |
+          prev_tag=$(git tag --sort=-creatordate | grep -B1 "${{ steps.current_tag.outputs.tag }}" | head -n1)
+          echo "prev_tag=$prev_tag" >> $GITHUB_OUTPUT
+      - name: Check if App.java changed
+        id: check
+        run: |
+          if git diff --name-only ${{ steps.previous_tag.outputs.prev_tag }} ${{ steps.current_tag.outputs.tag }} | grep -q 'oneProjectWed/src/java/com/miha/app/App.java'; then
+            echo "should_notify=true" >> $GITHUB_OUTPUT
+          else
+            echo "should_notify=false" >> $GITHUB_OUTPUT
+          fi
+
+  notify:
+    needs: check_app_change
+    if: needs.check_app_change.outputs.should_notify == 'true'
+    uses: ./.github/workflows/teams-notif-simple.yml
+    with:
+      notification_title: "🚀 App.java Changed in Release"
+      action_required_message: "⚠️ Prepare new installer for Template Designer"
+      files: "oneProjectWed/src/java/com/miha/app/App.java"
+    secrets:
+      teams_webhook_url: ${{ secrets.TEAMS_WEBHOOK_INSTALLER_URL }}

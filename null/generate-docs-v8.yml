@@ -1,0 +1,241 @@
+name: 📝 Generate/Update README Documentation
+
+on:
+  workflow_dispatch:
+#  pull_request:
+#    paths:
+#      - ".github/workflows/*.yml"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  GITHUB_USER_TOKEN: ${{ secrets.USER_TOKEN }}
+  GITHUB_USER_EMAIL: email@company.net
+  GITHUB_USER_NAME: user1
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.prep_matrix.outputs.matrix }}
+      pr_source_branch: ${{ steps.get_source_branch.outputs.pr_source_branch }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect changed workflow files
+        id: detect
+        uses: tj-actions/changed-files@v44
+        with:
+          files: |
+            .github/workflows/*.yml
+            !.github/workflows/generate-docs-v8.yml
+
+      - name: Stop if no workflows changed
+        if: steps.detect.outputs.any_changed == 'false'
+        run: echo "No workflow changes detected. Skipping documentation." && exit 0
+
+      - name: Prepare matrix JSON
+        id: prep_matrix
+        run: |
+          json="[]"
+          for f in ${{ steps.detect.outputs.all_changed_files }}; do
+            base=$(basename "$f" .yml)
+            json=$(echo "$json" | jq --arg wf "$f" --arg b "$base" '. += [{"workflow":$wf,"basename":$b}]')
+          done
+          escaped_json=$(echo "$json" | jq -c '.')
+          echo "matrix=$escaped_json" >> $GITHUB_OUTPUT
+
+      - name: Get PR source branch
+        id: get_source_branch
+        run: |
+          echo "pr_source_branch=${{ github.head_ref }}" >> $GITHUB_OUTPUT
+
+  update-doc:
+    needs: detect-changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    strategy:
+      fail-fast: false
+      matrix:
+        item: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ env.GITHUB_USER_TOKEN }}
+
+      - name: Install yq (YAML parser)
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Create custom documentation script
+        run: |
+          cat > generate_docs.sh << 'SCRIPT_EOF'
+          #!/bin/bash
+          set -e
+
+          WORKFLOW_FILE="$1"
+          OUTPUT_FILE="$2"
+          TEMPLATE_FILE="$3"
+
+          # Extract workflow name
+          WORKFLOW_NAME=$(yq eval '.name' "$WORKFLOW_FILE")
+          SOURCE_FILE=$(basename "$WORKFLOW_FILE")
+
+          # Start building the documentation
+          cat "$TEMPLATE_FILE" > "$OUTPUT_FILE"
+
+          # Add the header section
+          cat >> "$OUTPUT_FILE" << EOF
+
+          # ${WORKFLOW_NAME}
+          **Source:** \`${SOURCE_FILE}\`
+
+          ## Triggers
+          EOF
+
+          # Extract triggers
+          yq eval '.on | keys | .[]' "$WORKFLOW_FILE" | while read -r trigger; do
+            echo "- \`$trigger\`" >> "$OUTPUT_FILE"
+          done
+
+          # Extract inputs if workflow_call exists
+          if yq eval '.on.workflow_call.inputs' "$WORKFLOW_FILE" | grep -v "null" > /dev/null 2>&1; then
+            cat >> "$OUTPUT_FILE" << EOF
+
+          ## Inputs
+          | name | type | required | default | description |
+          | --- | --- | --- | --- | --- |
+          EOF
+            
+            yq eval '.on.workflow_call.inputs | to_entries | .[]' "$WORKFLOW_FILE" -o=json | jq -r '
+              .key as $name |
+              .value |
+              "| \($name) | \(.type // "string") | \(if .required then "yes" else "no" end) | \(.default // "") | \(.description // "") |"
+            ' >> "$OUTPUT_FILE"
+          else
+            echo -e "\n## Inputs\n_None_" >> "$OUTPUT_FILE"
+          fi
+
+          # Extract outputs if they exist
+          if yq eval '.on.workflow_call.outputs' "$WORKFLOW_FILE" | grep -v "null" > /dev/null 2>&1; then
+            cat >> "$OUTPUT_FILE" << EOF
+
+          ## Outputs
+          | name | description |
+          | --- | --- |
+          EOF
+            
+            yq eval '.on.workflow_call.outputs | to_entries | .[]' "$WORKFLOW_FILE" -o=json | jq -r '
+              .key as $name |
+              .value |
+              "| \($name) | \(.description // "") |"
+            ' >> "$OUTPUT_FILE"
+          else
+            echo -e "\n## Outputs\n_None_" >> "$OUTPUT_FILE"
+          fi
+
+          # Extract secrets if they exist
+          if yq eval '.on.workflow_call.secrets' "$WORKFLOW_FILE" | grep -v "null" > /dev/null 2>&1; then
+            cat >> "$OUTPUT_FILE" << EOF
+
+          ## Secrets
+          | name | required | description |
+          | --- | --- | --- |
+          EOF
+            
+            yq eval '.on.workflow_call.secrets | to_entries | .[]' "$WORKFLOW_FILE" -o=json | jq -r '
+              .key as $name |
+              .value |
+              "| \($name) | \(if .required then "yes" else "no" end) | \(.description // "") |"
+            ' >> "$OUTPUT_FILE"
+          else
+            echo -e "\n## Secrets\n_None_" >> "$OUTPUT_FILE"
+          fi
+
+          # Extract jobs
+          cat >> "$OUTPUT_FILE" << EOF
+
+          ## Jobs
+          EOF
+
+          yq eval '.jobs | keys | .[]' "$WORKFLOW_FILE" | while read -r job_name; do
+            echo -e "\n### ${job_name}" >> "$OUTPUT_FILE"
+            echo "| name | action | run |" >> "$OUTPUT_FILE"
+            echo "| --- | --- | --- |" >> "$OUTPUT_FILE"
+            
+            yq eval ".jobs.${job_name}.steps[]" "$WORKFLOW_FILE" -o=json | jq -r '
+              .name as $name |
+              (.uses // "") as $action |
+              (if .run then "`run` command" else "" end) as $run |
+              "| \($name) | \($action) | \($run) |"
+            ' >> "$OUTPUT_FILE"
+          done
+
+          # Add full YAML section
+          cat >> "$OUTPUT_FILE" << EOF
+
+          ## Full YAML
+          \`\`\`yaml
+          $(cat "$WORKFLOW_FILE")
+          \`\`\`
+          EOF
+
+          echo "✅ Documentation generated: $OUTPUT_FILE"
+          SCRIPT_EOF
+
+          chmod +x generate_docs.sh
+
+      - name: Create missing READMEs from template
+        run: |
+          TEMPLATE="docs/README-reusable.md"
+          readme="docs/README-${{ matrix.item.basename }}.md"
+
+          if [ ! -f "$readme" ]; then
+            echo "Creating $readme from template"
+            cp "$TEMPLATE" "$readme"
+          fi
+
+      - name: Generate documentation
+        run: |
+          ./generate_docs.sh \
+            "${{ matrix.item.workflow }}" \
+            "docs/README-${{ matrix.item.basename }}.md" \
+            "docs/README-reusable.md"
+
+      - name: Verify changed README
+        id: verify
+        uses: tj-actions/verify-changed-files@v19
+        with:
+          files: docs/README-${{ matrix.item.basename }}.md
+
+      - name: Print verification result
+        run: |
+          if [ "${{ steps.verify.outputs.files_changed }}" == "true" ]; then
+            echo "✅ README updated: docs/README-${{ matrix.item.basename }}.md"
+            echo "--- Content Preview ---"
+            head -50 docs/README-${{ matrix.item.basename }}.md
+            echo "---"
+          else
+            echo "ℹ️ No changes detected"
+          fi
+
+      - name: Create Pull Request for Documentation Update
+        if: steps.verify.outputs.files_changed == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "docs: auto-update README for ${{ matrix.item.basename }}"
+          title: "docs: auto-update README for ${{ matrix.item.basename }}"
+          body: "This PR was automatically generated to update the documentation for workflow `${{ matrix.item.basename }}`."
+          branch: "auto-doc/update-readme-${{ matrix.item.basename }}"
+          token: ${{ env.GITHUB_USER_TOKEN }}
+          committer: ${{ env.GITHUB_USER_NAME }} <${{ env.GITHUB_USER_EMAIL }}>
+          base: ${{ needs.detect-changes.outputs.pr_source_branch || github.event.pull_request.base.ref }}

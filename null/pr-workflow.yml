@@ -1,0 +1,15 @@
+name: Test PR Workflow
+
+on:
+#  pull_request:
+#    types: [opened, synchronize]
+  workflow_dispatch: 
+
+jobs:
+  print-info:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Show PR info
+        run: |
+          echo "PR base branch: ${{ github.event.pull_request.base.ref }}"
+          echo "PR head branch: ${{ github.event.pull_request.head.ref }}"

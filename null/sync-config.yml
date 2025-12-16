@@ -1,0 +1,47 @@
+# ========================================
+# File Sync Configuration (Matrix Mode)
+# ========================================
+#
+# This file maps source files to destinations.
+# Each mapping runs independently.
+# ========================================
+
+# ────────────────────────────────────
+# Global Settings (apply to all mappings)
+# ────────────────────────────────────
+destination_repo: m-nikolovska-mak-system/deployment-reference
+sync_mode: all
+create_tag: true
+tag_prefix: platform-
+
+# ────────────────────────────────────
+# Mappings: source → destination
+# ────────────────────────────────────
+mappings:
+  - name: app-java-to-platform
+    source:
+      - oneProjectWed/src/java/com/miha/app/App.java
+    destination: application/config
+    preserve_structure: false
+
+  
+  # Mapping 2: Documentation (always sync)
+  - name: documentation
+    source:
+      - README.md
+      - scripts/generate_readme.py
+    destination: application/resources
+    preserve_structure: false
+   # sync_mode: all
+
+  
+ 
+# ────────────────────────────────────
+# Add more mappings as needed:
+# ────────────────────────────────────
+# - name: your-mapping-name
+#   source:
+#     - path/to/files
+#   destination: target/path
+#   preserve_structure: true
+#   sync_mode: changed

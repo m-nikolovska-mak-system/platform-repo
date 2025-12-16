@@ -1,0 +1,23 @@
+name: Dispatch Test HELLO THIS IS ANOTHER TEST FOR WFDISPATCH HERE!! 
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        type: string
+        required: true
+      debug_enabled:
+        description: "Enable verbose logging"
+        type: boolean
+        default: false
+        required: false
+
+jobs:
+  print:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Show Inputs
+        run: |
+          echo "Environment: ${{ github.event.inputs.environment }}"
+          echo "Debug enabled: ${{ github.event.inputs.debug_enabled }}"

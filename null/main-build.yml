@@ -1,0 +1,134 @@
+name: Main Build and Release
+
+on:
+  #release:
+  #  types: [created]
+  workflow_dispatch:
+
+jobs:
+  build-jar:
+    runs-on: ubuntu-latest
+    outputs:
+      jar_cache_key: ${{ steps.cache-key.outputs.key }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || 'main' }}
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Make Gradle wrapper executable
+        run: chmod +x gradlew
+
+      - name: Cache Gradle dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Build JAR with Gradle
+        run: ./gradlew jar --no-daemon
+
+      - name: Validate JAR
+        run: |
+          jar_file=$(ls build/libs/*.jar 2>/dev/null | head -n 1)
+          if [ -z "$jar_file" ]; then
+            echo "❌ No JAR files found"
+            exit 1
+          fi
+          echo "✓ Found $(basename "$jar_file")"
+
+      - name: Generate cache key
+        id: cache-key
+        run: echo "key=jar-${{ github.sha }}-${{ github.run_number }}" >> $GITHUB_OUTPUT
+
+      - name: Cache built JAR
+        uses: actions/cache/save@v3
+        with:
+          path: build/libs/*.jar
+          key: ${{ steps.cache-key.outputs.key }}
+
+  detect-setup-script:
+    runs-on: ubuntu-latest
+    outputs:
+         setup_script: ${{ steps.detect-iss.outputs.script }}
+    steps:
+        - name: Checkout code
+          uses: actions/checkout@v4
+  
+        - name: Detect setup script
+          id: detect-iss
+          run: |
+            file=$(ls *.iss 2>/dev/null | head -n 1)
+            if [ -z "$file" ]; then
+              echo "❌ No .iss setup script found!"
+              exit 1
+            fi
+            echo "Found setup script: $file"
+            echo "script=$file" >> $GITHUB_OUTPUT
+      
+  call-installer:
+      needs: [build-jar, detect-setup-script]
+      uses: m-nikolovska-mak-system/reusable-actions-library/.github/workflows/build-installer.yml@main
+      with:
+        jar_cache_key: ${{ needs.build-jar.outputs.jar_cache_key }}
+        release_tag: ${{ github.event.release.tag_name || 'main' }}
+        setup_script: ${{ needs.detect-setup-script.outputs.setup_script }}
+        app_name: ${{ github.event.repository.name }}
+        app_version: ${{ github.event.release.tag_name }}
+        output_name: "Setup-${{ github.event.release.tag_name }}"
+
+
+      
+
+  upload-to-release:
+    needs: call-installer
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download installer artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: setup-installer
+          path: output
+          
+      - name: Verify installer exists
+        run: |
+          echo "=== Files downloaded ==="
+          ls -lh output/
+          
+          expected="Setup-${{ github.event.release.tag_name }}.exe"
+          if [ ! -f "output/$expected" ]; then
+            echo "❌ Installer not found: $expected"
+            exit 1
+          fi
+          echo "✓ Found $expected"
+
+                
+      - name: Upload installer to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: output/*.exe
+          tag_name: ${{ github.event.release.tag_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+          
+  notify-on-failure:
+    needs: [build-jar, call-installer, upload-to-release]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report failure
+        run: |
+          echo "❌ Workflow failed"
+          echo "Failed jobs: ${{ toJSON(needs) }}"

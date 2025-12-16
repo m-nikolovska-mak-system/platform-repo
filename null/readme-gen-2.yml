@@ -1,0 +1,14 @@
+name: Generate Action Docs
+
+on:
+  workflow_dispatch:
+#  push:
+#    branches: [main]
+
+jobs:
+  generate-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Generate docs
+        uses: nektos/action-docs@v2

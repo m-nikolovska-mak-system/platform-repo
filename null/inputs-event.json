@@ -1,0 +1,7 @@
+{
+  "notification_title": "Test Notification",
+  "action_required_message": "This is a test message",
+  "card_color": "Accent",
+  "show_files": true,
+  "files": "README.md, script.sh"
+}

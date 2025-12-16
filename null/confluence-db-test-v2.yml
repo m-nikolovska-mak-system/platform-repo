@@ -1,0 +1,26 @@
+name: Confluence DB Debug
+on:
+  workflow_dispatch:
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    env:
+      BASE: ${{ vars.CONFLUENCE_BASE }}
+      EMAIL: ${{ secrets.CONFLUENCE_USER }}
+      TOKEN: ${{ secrets.CONFLUENCE_API_TOKEN }}
+      DB_ID: ${{ secrets.CONFLUENCE_DB_PAGE_ID }}
+    steps:
+      - name: Test 1 - Raw response without jq
+        run: |
+          echo "=== Raw API Response ==="
+          curl -s -u "$EMAIL:$TOKEN" "$BASE/wiki/api/v2/databases/$DB_ID"
+      
+      - name: Test 2 - With headers to see HTTP status
+        run: |
+          echo "=== With Headers ==="
+          curl -i -u "$EMAIL:$TOKEN" "$BASE/wiki/api/v2/databases/$DB_ID"
+      
+      - name: Test 3 - Check if endpoint exists
+        run: |
+          echo "=== Status Code Only ==="
+          curl -s -o /dev/null -w "%{http_code}" -u "$EMAIL:$TOKEN" "$BASE/wiki/api/v2/databases/$DB_ID"

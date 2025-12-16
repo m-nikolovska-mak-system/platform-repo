@@ -1,0 +1,16 @@
+name: Nightly Crons THIS IS TO TEST SCHEDULED
+on:
+#  schedule:
+ #   - cron: "0 2 * * *"
+  #  - cron: "30 7 * * 1-5"
+ # push:
+  #  branches:
+   #   - "main"
+
+   workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Scheduled job running"

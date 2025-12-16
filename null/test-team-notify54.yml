@@ -1,0 +1,61 @@
+name: Notify Teams on Changes
+
+on:
+  # Trigger on pushes to main branch
+ # push:
+#    branches:
+ #     - main
+  
+  # Allow manual triggering for testing
+  workflow_dispatch:
+    inputs:
+      test_message:
+        description: 'Custom test message'
+        required: false
+        default: '🧪 Manual test notification'
+
+jobs:
+  # Detect which files changed
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      changed_files: ${{ steps.changes.outputs.files }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2  # Get last 2 commits to compare
+      
+      - name: Get changed files
+        id: changes
+        run: |
+          # For push events, compare with previous commit
+          if [ "${{ github.event_name }}" = "push" ]; then
+            FILES=$(git diff --name-only HEAD^ HEAD | tr '\n' ',' | sed 's/,$//')
+          else
+            # For manual dispatch, just list some key files
+            FILES="Manual trigger - no file changes"
+          fi
+          
+          # If no files, set a default message
+          if [ -z "$FILES" ]; then
+            FILES="No files detected"
+          fi
+          
+          echo "files=$FILES" >> $GITHUB_OUTPUT
+          echo "📂 Changed files: $FILES"
+
+  # Send notification to Teams
+  notify-teams:
+    needs: detect-changes
+    uses: m-nikolovska-mak-system/reusable-actions-library/.github/workflows/teams-notifier.yml@main
+    with:
+      notification_title: ${{ github.event_name == 'workflow_dispatch' && inputs.test_message || '✅ Code Pushed to Main' }}
+      action_required_message: ${{ github.event_name == 'workflow_dispatch' && '🧪 This is a test notification. Everything is working!' || '📝 New changes have been pushed. Please review if needed.' }}
+      card_color: ${{ github.event_name == 'workflow_dispatch' && 'Accent' || 'Good' }}
+      files: ${{ needs.detect-changes.outputs.changed_files }}
+      custom_timezone: 'Europe/Belgrade'  # Change to your timezone
+      include_actor: true
+    secrets:
+      teams_webhook_url: ${{ secrets.TEAMS_WEBHOOK_URL }}
+
