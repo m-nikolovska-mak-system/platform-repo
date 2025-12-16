@@ -1,0 +1,23 @@
+{
+  "name": "workflow-doc-generator",
+  "version": "1.0.0",
+  "description": "Generates full documentation pages for GitHub Actions workflows",
+  "main": "generate-workflow-docs.js",
+  "type": "module",
+  "scripts": {
+    "generate-docs": "node generate-workflow-docs.js"
+  },
+  "keywords": [
+    "github",
+    "actions",
+    "workflow",
+    "documentation",
+    "markdown"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "fs-extra": "^11.2.0",
+    "js-yaml": "^4.1.0"
+  }
+}

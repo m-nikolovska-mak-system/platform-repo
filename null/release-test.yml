@@ -1,0 +1,18 @@
+name: Test Release Workflow
+
+on:
+#  release:
+ #   types: [created]  # triggers when a GitHub release is created
+ workflow_dispatch:
+
+jobs:
+  print-release-info:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Show release info
+        run: |
+          echo "Release tag: ${{ github.event.release.tag_name }}"
+          echo "Release name: ${{ github.event.release.name }}"
+          echo "Draft? ${{ github.event.release.draft }}"
+          echo "Prerelease? ${{ github.event.release.prerelease }}"
+          echo "Body: ${{ github.event.release.body }}"

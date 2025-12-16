@@ -1,0 +1,160 @@
+name: 📝 Generate/Update README Documentation
+
+on:
+  workflow_dispatch:
+#  pull_request:
+#    paths:
+ #     - ".github/workflows/*.yml"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  GITHUB_USER_TOKEN: ${{ secrets.USER_TOKEN }}
+  GITHUB_USER_EMAIL: email@company.net
+  GITHUB_USER_NAME: user1
+
+jobs:
+  detect-changes:
+    # ⬅️ Prevent bot-trigger loops
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.prep_matrix.outputs.matrix }}
+      has_changes: ${{ steps.prep_matrix.outputs.has_changes }}
+      pr_source_branch: ${{ steps.get_source_branch.outputs.pr_source_branch }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect changed workflow files
+        id: detect
+        uses: tj-actions/changed-files@v44
+        with:
+          # ⬅️ Correct PR comparison to avoid false/no changes
+          base_sha: ${{ github.event.pull_request.base.sha }}
+          sha: ${{ github.event.pull_request.head.sha }}
+          files: |
+            .github/workflows/*.yml
+            !.github/workflows/ci-readme-docs.yml
+
+      - name: Print changed workflow files
+        run: |
+          echo "Changed workflow files:"
+          if [ -n "${{ steps.detect.outputs.all_changed_files }}" ]; then
+            for f in ${{ steps.detect.outputs.all_changed_files }}; do
+              echo " - $f"
+            done
+          else
+            echo " - (none)"
+          fi
+
+      - name: Prepare matrix JSON
+        id: prep_matrix
+        run: |
+          json="[]"
+          has_changes="false"
+
+          if [ "${{ steps.detect.outputs.any_changed }}" == "true" ]; then
+            echo "✅ Changed workflows detected:"
+            for f in ${{ steps.detect.outputs.all_changed_files }}; do
+              echo " - $f"
+              base=$(basename "$f" .yml)
+              json=$(echo "$json" | jq --arg wf "$f" --arg b "$base" '. += [{"workflow":$wf,"basename":$b}]')
+            done
+            has_changes="true"
+          else
+            echo "ℹ️ No workflow changes detected. Documentation update will be skipped."
+          fi
+
+          escaped_json=$(echo "$json" | jq -c '.')
+          echo "matrix=$escaped_json" >> $GITHUB_OUTPUT
+          echo "has_changes=$has_changes" >> $GITHUB_OUTPUT
+
+          echo "Matrix output: $escaped_json"
+          echo "Has changes: $has_changes"
+
+      - name: Get PR source branch
+        id: get_source_branch
+        run: |
+          echo "pr_source_branch=${{ github.head_ref }}" >> $GITHUB_OUTPUT
+
+  update-doc:
+    needs: detect-changes
+    # ⬅️ Prevent bot from running this job as well
+    if: ${{ github.actor != 'github-actions[bot]' && needs.detect-changes.outputs.has_changes == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        item: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ env.GITHUB_USER_TOKEN }}
+
+
+      
+      - name: Create missing README
+        run: |
+          TEMPLATE="docs/README-template.md"
+          readme="docs/README-${{ matrix.item.basename }}.md"
+          if [ ! -f "$readme" ]; then
+            echo "Creating $readme"
+            cp "$TEMPLATE" "$readme"
+          fi
+
+    
+      - name: Print workflow and README paths
+        run: |
+          echo "Workflow: ${{ matrix.item.workflow }}"
+          echo "README: docs/README-${{ matrix.item.basename }}.md"
+
+
+      - name: Install PyYAML
+        run: pip install pyyaml
+
+      - name: Generate documentation from template
+        run: |
+          python3 scripts/generate-docs-from-template.py \
+            --workflow "${{ matrix.item.workflow }}" \
+            --template "docs/README-template.md" \
+            --output "docs/README-${{ matrix.item.basename }}.md"
+
+      - name: Verify changed README
+        id: verify
+        uses: tj-actions/verify-changed-files@v19
+        with:
+          files: docs/README-${{ matrix.item.basename }}.md
+
+      - name: Print verification result
+        run: |
+          if [ "${{ steps.verify.outputs.files_changed }}" == "true" ]; then
+            echo "✅ README updated: docs/README-${{ matrix.item.basename }}.md"
+            echo "--- Content Preview (first 20 lines) ---"
+            head -n 20 docs/README-${{ matrix.item.basename }}.md
+            echo "..."
+          else
+            echo "ℹ️ No changes detected for docs/README-${{ matrix.item.basename }}.md"
+          fi
+
+      - name: Create Pull Request for Documentation Update
+        if: steps.verify.outputs.files_changed == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "docs: auto-update README for ${{ matrix.item.basename }}"
+          title: "docs: auto-update README for ${{ matrix.item.basename }}"
+          body: "This PR was automatically generated to update the documentation for workflow `${{ matrix.item.basename }}`."
+          branch: "auto-doc/update-readme-${{ matrix.item.basename }}"
+          committer: ${{ env.GITHUB_USER_NAME }} <${{ env.GITHUB_USER_EMAIL }}>
+          base: ${{ needs.detect-changes.outputs.pr_source_branch || github.event.pull_request.base.ref }}

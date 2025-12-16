@@ -1,0 +1,62 @@
+name: 📊 Step 3 - Update Confluence Database
+#not working
+on:
+  workflow_call:  # Can be called by orchestrator
+    inputs:
+      page_mappings:
+        description: 'JSON mapping of workflow names to page IDs'
+        required: true
+        type: string
+  workflow_dispatch:  # Can still run manually
+    inputs:
+      page_mappings:
+        description: 'JSON mapping (e.g., {"README-deploy":"123456"})'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  update-database:
+    name: 🗃️ Update Confluence Database Table
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Parse mappings and update database
+        run: |
+          MAPPINGS='${{ inputs.page_mappings }}'
+          echo "📋 Received mappings: $MAPPINGS"
+          
+          # Parse JSON and call Python script for each entry
+          echo "$MAPPINGS" | jq -r 'to_entries[] | "\(.key) \(.value)"' | while read -r WORKFLOW_NAME PAGE_ID; do
+            echo "📝 Updating database: $WORKFLOW_NAME -> $PAGE_ID"
+            
+            python scripts/update_confluence_database.py \
+              "$WORKFLOW_NAME" \
+              "$PAGE_ID"
+          done
+        env:
+          CONFLUENCE_BASE: ${{ vars.CONFLUENCE_BASE }}
+          CONFLUENCE_USER: ${{ secrets.CONFLUENCE_USER }}
+          CONFLUENCE_API_TOKEN: ${{ secrets.CONFLUENCE_API_TOKEN }}
+          CONFLUENCE_DB_PAGE_ID: ${{ secrets.CONFLUENCE_DB_PAGE_ID }}
+
+      - name: Notify success
+        if: success()
+        run: echo "::notice::✅ Confluence database updated successfully!"
+
+      - name: Notify failure
+        if: failure()
+        run: echo "::error::❌ Database update failed. Check the logs above for details."

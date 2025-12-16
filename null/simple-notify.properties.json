@@ -1,0 +1,7 @@
+{
+  "name": "Simple Notify Workflow",
+  "description": "A basic workflow that prints Hello. Use this as a starting point.",
+  "iconName": "smile",
+  "categories": ["automation", "example"],
+  "filePatterns": ["**/*.yml"]
+}

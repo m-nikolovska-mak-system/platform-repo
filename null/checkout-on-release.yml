@@ -1,0 +1,20 @@
+name: Checkout on Release
+
+on:
+#  release:
+ #   types: [created]
+  workflow_dispatch: 
+jobs:
+  checkout:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code at release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Show current commit and tag
+        run: |
+          echo "Checked out tag: ${{ github.event.release.tag_name }}"
+          git log -1

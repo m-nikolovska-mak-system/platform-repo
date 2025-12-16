@@ -1,0 +1,466 @@
+# ========================================
+# Matrix-Based File Sync Workflow
+# Single Commit for All Mappings
+# ========================================
+name: Sync to Platform Repo (Matrix)
+
+on:
+  workflow_dispatch:  # Manual testing
+  release:
+    types: [published]
+
+jobs:
+  # ─────────────────────────────────────
+  # JOB 1: Load and Validate Config
+  # ─────────────────────────────────────
+  load-matrix:
+    name: Load Sync Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      destination_repo: ${{ steps.global.outputs.destination_repo }}
+      create_tag: ${{ steps.global.outputs.create_tag }}
+      tag_prefix: ${{ steps.global.outputs.tag_prefix }}
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+      
+      - name: Validate config file exists
+        run: |
+          if [ ! -f .github/sync-config.yml ]; then
+            echo "❌ ERROR: Config file not found at .github/sync-config.yml"
+            exit 1
+          fi
+          echo "✅ Config file found"
+      
+      - name: Load global settings
+        id: global
+        run: |
+          CONFIG_FILE=".github/sync-config.yml"
+          
+          DEST_REPO=$(yq eval '.destination_repo' $CONFIG_FILE)
+          CREATE_TAG=$(yq eval '.create_tag' $CONFIG_FILE)
+          TAG_PREFIX=$(yq eval '.tag_prefix' $CONFIG_FILE)
+          
+          # Validate required fields
+          if [ "$DEST_REPO" == "null" ] || [ -z "$DEST_REPO" ]; then
+            echo "❌ ERROR: destination_repo is required in config"
+            exit 1
+          fi
+          
+          echo "destination_repo=$DEST_REPO" >> $GITHUB_OUTPUT
+          echo "create_tag=$CREATE_TAG" >> $GITHUB_OUTPUT
+          echo "tag_prefix=$TAG_PREFIX" >> $GITHUB_OUTPUT
+          
+          echo "📋 Global Settings:"
+          echo "  Destination: $DEST_REPO"
+          echo "  Create tag: $CREATE_TAG"
+          echo "  Tag prefix: $TAG_PREFIX"
+      
+      - name: Build and validate matrix
+        id: set-matrix
+        run: |
+          CONFIG_FILE=".github/sync-config.yml"
+          
+          # Convert YAML mappings to compact JSON (one line)
+          MATRIX=$(yq eval -o=json '.mappings' "$CONFIG_FILE" | jq -c '.')
+          
+          # Validate matrix is not empty
+          if [ "$MATRIX" = "null" ] || [ "$MATRIX" = "[]" ]; then
+            echo "❌ ERROR: No mappings found in config"
+            exit 1
+          fi
+          
+          # Count mappings
+          COUNT=$(echo "$MATRIX" | jq '. | length')
+          echo "📋 Found $COUNT mapping(s)"
+          
+          # Validate each mapping has required fields
+          INVALID=$(echo "$MATRIX" | jq -r '.[] | select(.name == null or .source == null or .destination == null) | .name // "unnamed"')
+          if [ -n "$INVALID" ]; then
+            echo "❌ ERROR: Mapping missing required fields: $INVALID"
+            exit 1
+          fi
+          
+          # Write matrix output (must be single-line)
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          
+          # Display mappings
+          echo ""
+          echo "📋 Mappings to process:"
+          echo "$MATRIX" | jq -r '.[] | "  ✓ \(.name): \(.source | length) file(s) → \(.destination)"'
+
+  # ─────────────────────────────────────
+  # JOB 2: Prepare Files (Runs per mapping)
+  # ─────────────────────────────────────
+  prepare-files:
+    name: 📦 Prepare ${{ matrix.mapping.name }}
+    needs: load-matrix
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        mapping: ${{ fromJson(needs.load-matrix.outputs.matrix) }}
+      fail-fast: false
+      max-parallel: 5
+    
+    steps:
+      - name: Checkout source repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Detect files to sync
+        id: detect
+        run: |
+          echo "🔍 Detecting files for: ${{ matrix.mapping.name }}"
+          
+          SYNC_MODE="${{ matrix.mapping.sync_mode || 'all' }}"
+          echo "  Sync mode: $SYNC_MODE"
+          
+          # Get base list of files
+          if [ "$SYNC_MODE" == "changed" ]; then
+            # Find changed files since last tag
+            git fetch --tags
+            LATEST="${{ github.ref_name }}"
+            PREVIOUS=$(git describe --tags --abbrev=0 ${LATEST}^ 2>/dev/null || echo "")
+            
+            if [ -z "$PREVIOUS" ]; then
+              echo "  ℹ️  First release - syncing all files"
+              git ls-files > all_files.txt
+            else
+              echo "  📊 Comparing $PREVIOUS → $LATEST"
+              git diff --name-only $PREVIOUS $LATEST > all_files.txt
+            fi
+          else
+            # Sync all specified files
+            echo "  📊 Syncing all specified files"
+            git ls-files > all_files.txt
+          fi
+          
+          # Filter by source patterns
+          > files_to_sync.txt
+          
+          echo ""
+          echo "  📂 Checking source patterns:"
+          echo '${{ toJson(matrix.mapping.source) }}' | jq -r '.[]' | while IFS= read -r pattern; do
+            if [ -z "$pattern" ]; then
+              continue
+            fi
+            
+            echo "    • $pattern"
+            
+            # Check if pattern is a specific file or glob
+            if [[ "$pattern" == *"*"* ]]; then
+              # Glob pattern - convert to regex
+              REGEX="${pattern//\*\*/DOUBLESTAR}"
+              REGEX="${REGEX//\*/[^/]*}"
+              REGEX="${REGEX//DOUBLESTAR/.*}"
+              grep -E "^${REGEX}$" all_files.txt >> files_to_sync.txt 2>/dev/null || true
+            else
+              # Specific file - exact match
+              grep -Fx "$pattern" all_files.txt >> files_to_sync.txt 2>/dev/null || true
+            fi
+          done
+          
+          # Remove duplicates
+          sort -u files_to_sync.txt > files_to_sync_clean.txt || true
+          mv files_to_sync_clean.txt files_to_sync.txt
+          
+          # Verify files exist
+          > verified_files.txt
+          while IFS= read -r file; do
+            if [ -f "$file" ]; then
+              echo "$file" >> verified_files.txt
+            else
+              echo "  ⚠️  File not found: $file"
+            fi
+          done < files_to_sync.txt
+          
+          FILE_COUNT=$(wc -l < verified_files.txt 2>/dev/null || echo "0")
+          
+          echo ""
+          echo "  ✅ Found $FILE_COUNT file(s) to sync"
+          
+          if [ $FILE_COUNT -eq 0 ]; then
+            echo "has_files=false" >> $GITHUB_OUTPUT
+            echo "  ⚠️  No files to sync for this mapping"
+          else
+            echo "has_files=true" >> $GITHUB_OUTPUT
+            echo "file_count=$FILE_COUNT" >> $GITHUB_OUTPUT
+            
+            echo ""
+            echo "  📄 Files to sync:"
+            cat verified_files.txt | sed 's/^/      /'
+            
+            # Save file list for next step
+            cp verified_files.txt files_to_sync_final.txt
+          fi
+      
+      - name: Prepare files for staging
+        if: steps.detect.outputs.has_files == 'true'
+        run: |
+          echo "📦 Preparing files for: ${{ matrix.mapping.name }}"
+          
+          # Create staging directory with mapping name
+          STAGING_DIR="staging-${{ matrix.mapping.name }}"
+          mkdir -p "$STAGING_DIR"
+          
+          DEST_PATH="${{ matrix.mapping.destination }}"
+          PRESERVE="${{ matrix.mapping.preserve_structure }}"
+          
+          COPIED=0
+          
+          while IFS= read -r file; do
+            if [ -z "$file" ] || [ ! -f "$file" ]; then
+              continue
+            fi
+            
+            # Determine destination path within staging
+            if [ "$PRESERVE" == "true" ]; then
+              DEST_FILE="$STAGING_DIR/$DEST_PATH/$file"
+              DEST_DIR=$(dirname "$DEST_FILE")
+            else
+              FILE_NAME=$(basename "$file")
+              DEST_FILE="$STAGING_DIR/$DEST_PATH/$FILE_NAME"
+              DEST_DIR="$STAGING_DIR/$DEST_PATH"
+            fi
+            
+            mkdir -p "$DEST_DIR"
+            cp -v "$file" "$DEST_FILE"
+            echo "  ✓ $file → $DEST_FILE"
+            COPIED=$((COPIED + 1))
+            
+          done < files_to_sync_final.txt
+          
+          echo ""
+          echo "  📊 Prepared $COPIED file(s) in staging"
+          
+          # Create metadata file
+          cat > "$STAGING_DIR/metadata.json" <<EOF
+          {
+            "mapping_name": "${{ matrix.mapping.name }}",
+            "destination": "${{ matrix.mapping.destination }}",
+            "preserve_structure": ${{ matrix.mapping.preserve_structure }},
+            "file_count": $COPIED
+          }
+          EOF
+      
+      - name: Upload staged files
+        if: steps.detect.outputs.has_files == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: staged-files-${{ matrix.mapping.name }}
+          path: staging-${{ matrix.mapping.name }}/
+          retention-days: 1
+      
+      - name: Generate summary
+        if: always()
+        run: |
+          echo "## 📦 ${{ matrix.mapping.name }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Source patterns:** \`${{ toJson(matrix.mapping.source) }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Destination:** \`${{ matrix.mapping.destination }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Preserve structure:** ${{ matrix.mapping.preserve_structure }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Sync mode:** ${{ matrix.mapping.sync_mode || 'all' }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ steps.detect.outputs.has_files }}" == "true" ]; then
+            echo "✅ **Files prepared:** ${{ steps.detect.outputs.file_count }}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ **No files found to sync**" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # ─────────────────────────────────────
+  # JOB 3: Commit All Changes (Single Commit)
+  # ─────────────────────────────────────
+  commit-all-changes:
+    name: 💾 Commit All Changes
+    needs: [load-matrix, prepare-files]
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout destination repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.load-matrix.outputs.destination_repo }}
+          token: ${{ secrets.PLATFORM_PAT }}
+          fetch-depth: 0
+      
+      - name: Download all staged files
+        uses: actions/download-artifact@v4
+        with:
+          pattern: staged-files-*
+          path: all-staged-files/
+      
+      - name: Merge all staged files into destination
+        id: merge
+        run: |
+          echo "🔄 Merging all staged files..."
+          
+          TOTAL_FILES=0
+          TOTAL_MAPPINGS=0
+          
+          # Process each staged mapping
+          for staging_dir in all-staged-files/staged-files-*/; do
+            if [ ! -d "$staging_dir" ]; then
+              continue
+            fi
+            
+            TOTAL_MAPPINGS=$((TOTAL_MAPPINGS + 1))
+            
+            # Read metadata
+            if [ -f "$staging_dir/metadata.json" ]; then
+              MAPPING_NAME=$(jq -r '.mapping_name' "$staging_dir/metadata.json")
+              FILE_COUNT=$(jq -r '.file_count' "$staging_dir/metadata.json")
+              
+              echo ""
+              echo "📦 Processing: $MAPPING_NAME ($FILE_COUNT files)"
+              
+              TOTAL_FILES=$((TOTAL_FILES + FILE_COUNT))
+            fi
+            
+            # Copy all files (except metadata) to destination ROOT
+            find "$staging_dir" -type f -not -name "metadata.json" | while read -r file; do
+              # Remove the entire staging prefix to get the actual destination path
+              # staging_dir is like: all-staged-files/staged-files-app-java/
+              # file is like: all-staged-files/staged-files-app-java/application/config/App.java
+              # We want: application/config/App.java
+              
+              REL_PATH="${file#$staging_dir}"
+              
+              # Create directory structure if needed
+              DEST_DIR=$(dirname "$REL_PATH")
+              mkdir -p "$DEST_DIR"
+              
+              # Copy to the correct location in repo root
+              cp -v "$file" "$REL_PATH"
+              echo "  ✓ Copied: $REL_PATH"
+            done
+          done
+          
+          # Remove the staging directory from git tracking
+          rm -rf all-staged-files/
+          
+          echo ""
+          echo "📊 Summary:"
+          echo "  Mappings processed: $TOTAL_MAPPINGS"
+          echo "  Total files copied: $TOTAL_FILES"
+          
+          echo "total_files=$TOTAL_FILES" >> $GITHUB_OUTPUT
+          echo "total_mappings=$TOTAL_MAPPINGS" >> $GITHUB_OUTPUT
+      
+      - name: Commit and push all changes
+        run: |
+          echo "💾 Creating single commit for all changes..."
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git add .
+          
+          if git diff --staged --quiet; then
+            echo "  ℹ️  No changes detected (all files identical)"
+            exit 0
+          fi
+          
+          # Create comprehensive commit message
+          TAG="${{ github.ref_name }}"
+          REPO="${{ github.repository }}"
+          MAPPINGS="${{ steps.merge.outputs.total_mappings }}"
+          FILES="${{ steps.merge.outputs.total_files }}"
+          
+          cat > commit_message.txt <<EOF
+          🔄 Sync $MAPPINGS mapping(s) from $REPO ($TAG)
+          
+          Synced $FILES file(s) from release $TAG
+          
+          Mappings:
+          EOF
+          
+          # Add each mapping to commit message
+          for staging_dir in all-staged-files/staged-files-*/; do
+            if [ -f "$staging_dir/metadata.json" ]; then
+              MAPPING_NAME=$(jq -r '.mapping_name' "$staging_dir/metadata.json")
+              FILE_COUNT=$(jq -r '.file_count' "$staging_dir/metadata.json")
+              echo "  - $MAPPING_NAME: $FILE_COUNT file(s)" >> commit_message.txt
+            fi
+          done
+          
+          git commit -F commit_message.txt
+          
+          # Pull latest changes before pushing
+          git pull --rebase origin main || git pull --rebase origin master || true
+          
+          git push
+          
+          echo ""
+          echo "✅ Successfully pushed single commit with all changes"
+          
+          # Display commit info
+          git log -1 --stat
+
+  # ─────────────────────────────────────
+  # JOB 4: Create Tag (Optional)
+  # ─────────────────────────────────────
+  create-tag:
+    name: 🏷️ Create Release Tag
+    needs: [load-matrix, commit-all-changes]
+    if: needs.load-matrix.outputs.create_tag == 'true'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout destination
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.load-matrix.outputs.destination_repo }}
+          token: ${{ secrets.PLATFORM_PAT }}
+          fetch-depth: 0
+      
+      - name: Create and push tag
+        run: |
+          TAG_NAME="${{ needs.load-matrix.outputs.tag_prefix }}${{ github.ref_name }}"
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
+            echo "⚠️  Tag already exists: $TAG_NAME"
+            exit 0
+          fi
+          
+          git tag -a "$TAG_NAME" -m "Synced from ${{ github.repository }} (${{ github.ref_name }})"
+          git push origin "$TAG_NAME"
+          
+          echo "✅ Created tag: $TAG_NAME"
+
+  # ─────────────────────────────────────
+  # JOB 5: Final Summary
+  # ─────────────────────────────────────
+  summary:
+    name: 📊 Summary
+    needs: [load-matrix, prepare-files, commit-all-changes]
+    if: always()
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Generate final summary
+        run: |
+          echo "# 🎉 File Sync Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Trigger:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Source:** ${{ github.repository }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Release:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Destination:** ${{ needs.load-matrix.outputs.destination_repo }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ **All files synced in a single commit**" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Check the individual mapping results above ☝️" >> $GITHUB_STEP_SUMMARY

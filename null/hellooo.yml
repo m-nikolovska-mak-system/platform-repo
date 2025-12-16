@@ -1,0 +1,22 @@
+name: Test – reusable workflow
+on:
+  workflow_call:
+    inputs:
+      build_type:
+        type: string
+        required: true
+    outputs:
+      artifact_name:
+        description: "Output artifact name"
+        value: ${{ jobs.build.outputs.artifact }}
+    secrets:
+      TOKEN:
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      artifact: "demo.jar"
+    steps:
+      - run: echo "building"

@@ -1,0 +1,11 @@
+name: Simple Notify Workflow
+
+on:
+  workflow_dispatch:
+
+jobs:
+  say-hello:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Print Hello
+        run: echo "Hello from the workflow template!"

@@ -1,0 +1,22 @@
+name: Matrix Workflow THIS IS FOR MATRIX TESTS
+
+on:
+# push:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: [ "3.9", "3.10", "3.11" ]
+
+    steps:
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Long command test
+        run: |
+          echo "This is a deliberately extremely extremely extremely extremely long command that should be truncated when generating documentation"

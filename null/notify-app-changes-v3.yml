@@ -1,0 +1,56 @@
+name: Notify on App.java Changes
+
+on:
+ # release:
+ #   types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag to check (leave empty for latest)'
+        required: false
+        type: string
+      previous_tag:
+        description: 'Previous tag to compare against (optional)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  check-file-changes:
+    uses: m-nikolovska-mak-system/reusable-actions-library/.github/workflows/check-for-file-changes.yml@main
+    with:
+      watched_files: 'oneProjectWed/src/java/com/miha/app/App.java'
+      current_tag: ${{ github.event.release.tag_name || inputs.release_tag || '' }}
+      previous_tag: ${{ inputs.previous_tag || '' }}
+
+  # Optional: Keep for debugging during development, remove in production
+  debug-outputs:
+    needs: check-file-changes
+    runs-on: ubuntu-latest
+    if: ${{ always() }}  # Run even if check fails
+    steps:
+      - name: Print check results
+        run: |
+          echo "Job status: ${{ needs.check-file-changes.result }}"
+          echo "Files changed: ${{ needs.check-file-changes.outputs.files_changed }}"
+          echo "Changed files list: ${{ needs.check-file-changes.outputs.changed_files_list }}"
+
+  send-teams-notification:
+    needs: check-file-changes
+    if: needs.check-file-changes.outputs.files_changed == 'true'
+    uses: m-nikolovska-mak-system/reusable-actions-library/.github/workflows/send-teams-notification-v2.yml@main
+    with:
+      title: '🚀 App.java Changed in Release'
+      message: |
+        Prepare new installer for Template Designer
+        
+        Release: ${{ github.event.release.tag_name || inputs.release_tag }}
+        Released by: ${{ github.actor }}
+      color: 'Warning'
+      changed_files: ${{ needs.check-file-changes.outputs.changed_files_list }}
+      link_url: ${{ github.event.release.html_url || format('https://github.com/{0}/releases/tag/{1}', github.repository, inputs.release_tag) }}
+      link_text: 'View Release'
+    secrets:
+      teams_webhook_url: ${{ secrets.TEAMS_WEBHOOK_INSTALLER_URL }}

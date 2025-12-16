@@ -1,0 +1,60 @@
+name: 🧪 Test Workflow Call README
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test-readme:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Verify workflow file exists and show first 20 lines
+        run: |
+          echo "📂 Checking if workflow file exists..."
+          if [ -f .github/workflows/ci-build-jar.yml ]; then
+            echo "✅ File exists!"
+            echo ""
+            echo "📄 First 20 lines of the file:"
+            head -n 20 .github/workflows/ci-build-jar.yml
+          else
+            echo "❌ File not found!"
+            exit 1
+          fi
+
+      - name: Install PyYAML
+        run: pip install pyyaml
+
+      - name: Create docs directory
+        run: mkdir -p docs
+
+      - name: Generate README for build-jar workflow
+        run: |
+          python3 scripts/extract.py \
+            .github/workflows/ci-build-jar.yml \
+            docs/README-test.md
+
+      - name: Check generated README
+        run: |
+          echo "📄 README content (first 50 lines):"
+          head -n 50 docs/README-test.md
+          echo ""
+          echo "✅ Full README created at docs/README-test.md"
+
+      - name: Commit and push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/README-test.md
+          
+          if git diff --staged --quiet; then
+            echo "ℹ️ No changes to commit"
+          else
+            git commit -m "docs: generate README for build-jar workflow"
+            git push
+            echo "✅ Changes committed and pushed"
+          fi
