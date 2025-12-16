@@ -254,37 +254,6 @@ jobs:
           
           echo "copied_count=$COPIED" >> $GITHUB_OUTPUT
       
-      - name: Commit and push changes
-        if: steps.detect.outputs.has_files == 'true'
-        working-directory: destination
-        run: |
-          echo "💾 Committing changes for: ${{ matrix.mapping.name }}"
-
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          git add .
-
-          if git diff --staged --quiet; then
-            echo "  ℹ️  No changes detected (files identical)"
-            exit 0
-          fi
-
-          TAG="${{ github.ref_name }}"
-          REPO="${{ github.repository }}"
-          MSG="🔄 Sync ${{ matrix.mapping.name }} from ${REPO} (${TAG})"
-
-          git commit -m "$MSG"
-
-          # Pull remote changes and rebase our commit on top
-          git pull --rebase origin main || true
-
-          # Push our rebased commit
-          git push origin main
-          
-          echo "  ✅ Changes pushed successfully"
-
-      
       - name: Generate summary
         if: always()
         run: |
@@ -302,8 +271,146 @@ jobs:
             echo "⚠️ **No files found to sync**" >> $GITHUB_STEP_SUMMARY
           fi
 
+
   # ─────────────────────────────────────
-  # JOB 3: Create Tag (Optional)
+  # JOB 3: Single Commit & Push
+  # ─────────────────────────────────────
+  commit-and-push-all:
+    name: Commit & Push All Mappings
+    needs: [load-matrix, sync-files]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout destination repo (latest main)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.load-matrix.outputs.destination_repo }}
+          token: ${{ secrets.PLATFORM_PAT }}
+          fetch-depth: 0
+          path: destination
+
+      - name: Checkout source repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          path: source
+
+      - name: Re-run all mappings into destination
+        working-directory: source
+        run: |
+          echo "🔁 Re-running all mappings into a single destination workspace"
+
+          CONFIG_FILE=".github/sync-config.yml"
+
+          # Read matrix again
+          MATRIX=$(yq eval -o=json '.mappings' "$CONFIG_FILE" | jq -c '.')
+
+          # Prepare a clean working copy of destination
+          DEST_ROOT="../destination"
+
+          echo "$MATRIX" | jq -c '.[]' | while read -r mapping; do
+            NAME=$(echo "$mapping" | jq -r '.name')
+            DESTINATION=$(echo "$mapping" | jq -r '.destination')
+            PRESERVE=$(echo "$mapping" | jq -r '.preserve_structure // "false"')
+
+            echo ""
+            echo "📦 Applying mapping: $NAME"
+            echo "  Destination: $DESTINATION"
+            echo "  Preserve structure: $PRESERVE"
+
+            DEST_BASE="$DEST_ROOT/$DESTINATION"
+            mkdir -p "$DEST_BASE"
+
+            # Decide sync_mode: default 'all' unless overridden per mapping
+            SYNC_MODE_GLOBAL=$(yq eval '.sync_mode // "all"' "$CONFIG_FILE")
+            SYNC_MODE_MAPPING=$(echo "$mapping" | jq -r '.sync_mode // empty')
+            SYNC_MODE="${SYNC_MODE_MAPPING:-$SYNC_MODE_GLOBAL}"
+            echo "  Sync mode: $SYNC_MODE"
+
+            # Base file list
+            if [ "$SYNC_MODE" = "changed" ]; then
+              git fetch --tags
+              LATEST="${{ github.ref_name }}"
+              PREVIOUS=$(git describe --tags --abbrev=0 ${LATEST}^ 2>/dev/null || echo "")
+              if [ -z "$PREVIOUS" ]; then
+                echo "  ℹ️ First release - syncing all"
+                git ls-files > all_files.txt
+              else
+                echo "  📊 Comparing $PREVIOUS → $LATEST"
+                git diff --name-only "$PREVIOUS" "$LATEST" > all_files.txt
+              fi
+            else
+              git ls-files > all_files.txt
+            fi
+
+            # Filter by patterns
+            > files_to_sync.txt
+            echo "$mapping" | jq -r '.source[]' | while IFS= read -r pattern; do
+              if [ -z "$pattern" ]; then
+                continue
+              fi
+              echo "    • $pattern"
+              if [[ "$pattern" == *"*"* ]]; then
+                REGEX="${pattern//\*\*/DOUBLESTAR}"
+                REGEX="${REGEX//\*/[^/]*}"
+                REGEX="${REGEX//DOUBLESTAR/.*}"
+                grep -E "^${REGEX}$" all_files.txt >> files_to_sync.txt 2>/dev/null || true
+              else
+                grep -Fx "$pattern" all_files.txt >> files_to_sync.txt 2>/dev/null || true
+              fi
+            done
+
+            sort -u files_to_sync.txt > files_to_sync_clean.txt || true
+            mv files_to_sync_clean.txt files_to_sync.txt
+
+            while IFS= read -r file; do
+              [ -z "$file" ] && continue
+              [ ! -f "$file" ] && continue
+
+              if [ "$PRESERVE" = "true" ]; then
+                DEST_FILE="$DEST_BASE/$file"
+                DEST_DIR=$(dirname "$DEST_FILE")
+              else
+                FILE_NAME=$(basename "$file")
+                DEST_FILE="$DEST_BASE/$FILE_NAME"
+                DEST_DIR="$DEST_BASE"
+              fi
+
+              mkdir -p "$DEST_DIR"
+              cp -v "$file" "$DEST_FILE"
+            done < files_to_sync.txt
+          done
+
+      - name: Commit and push once
+        working-directory: destination
+        run: |
+          echo "💾 Committing all synced changes"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add .
+
+          if git diff --staged --quiet; then
+            echo "  ℹ️ No changes detected (files identical)"
+            exit 0
+          fi
+
+          TAG="${{ github.ref_name }}"
+          REPO="${{ github.repository }}"
+          MSG="🔄 Sync from ${REPO} release ${TAG}"
+
+          git commit -m "$MSG"
+
+          # Pull + rebase to include any external changes, then push
+          git pull --rebase origin main || true
+          git push origin main
+
+          echo "  ✅ Pushed single sync commit"
+        
+
+  # ─────────────────────────────────────
+  # JOB 4: Create Tag (Optional)
   # ─────────────────────────────────────
   create-tag:
     name: Create Release Tag
@@ -337,7 +444,7 @@ jobs:
           echo "✅ Created tag: $TAG_NAME"
 
   # ─────────────────────────────────────
-  # JOB 4: Final Summary
+  # JOB 5: Final Summary
   # ─────────────────────────────────────
   summary:
     name: Summary
