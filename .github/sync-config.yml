@@ -11,7 +11,7 @@
 # ────────────────────────────────────
 destination_repo: m-nikolovska-mak-system/deployment-reference
 sync_mode: all
-create_tag: false
+create_tag: true
 tag_prefix: platform-
 
 # ────────────────────────────────────
