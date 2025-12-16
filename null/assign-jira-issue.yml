@@ -1,4 +1,4 @@
-name: Assign Jira Issue 🚀 hi testing hello testing again
+name: Assign Jira Issue 🚀 hi testing hello testing again version 2
 on:
   workflow_dispatch:
     inputs:
